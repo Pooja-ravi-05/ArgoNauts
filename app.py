@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
-import time
-import random
-import requests
+import plotly.express as px
+import plotly.graph_objects as go
+from sqlalchemy import create_engine, text
+import re
+from datetime import datetime
 
-# Page config
+# -------------------- Page Configuration --------------------
 st.set_page_config(
     page_title="FloatChat - ARGO Data Explorer",
     page_icon="🌊",
@@ -12,217 +14,178 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS styling for chat messages and layout
+# -------------------- CSS Styling --------------------
 st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-        border: 1px solid #ddd;
-    }
-    .user-message {
-        background-color: #e6f7ff;
-        border-left: 4px solid #1890ff;
-        color: #000000;
-    }
-    .assistant-message {
-        background-color: #f6ffed;
-        border-left: 4px solid #52c41a;
-        color: #000000;
-    }
-    .stButton button {
-        width: 100%;
-        background-color: #1890ff;
-        color: white;
-    }
-    </style>
+<style>
+.main-header { font-size: 3rem; color: #1f77b4; text-align: center; margin-bottom: 1rem; }
+.sub-header { font-size: 1.5rem; color: #2ca02c; margin-bottom: 1rem; }
+.chat-message { padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; border: 1px solid #ddd; }
+.user-message { background-color: #e6f7ff; border-left: 4px solid #1890ff; }
+.assistant-message { background-color: #f6ffed; border-left: 4px solid #52c41a; }
+.stButton button { width: 100%; background-color: #1890ff; color: white; }
+</style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# -------------------- Session State --------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "user_input" not in st.session_state:
-    st.session_state.user_input = ""
-if "voice" not in st.session_state:
-    st.session_state.voice = "Google US English"
-if "pitch" not in st.session_state:
-    st.session_state.pitch = 1.0
-if "rate" not in st.session_state:
-    st.session_state.rate = 1.0
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
 
-# API keys (Replace these with your actual keys or better use st.secrets for security)
-OPENWEATHER_API_KEY = "3f8b16a724162f295bbff82b403997eb"
-NEWSAPI_API_KEY = "a371a01adbbf44f6a30de37fa20a5d0f"
+# -------------------- Database Connection --------------------
+# Replace with your credentials
+engine = create_engine("postgresql://postgres:mypassword@localhost:5432/floatchat")
 
-# Function to fetch live weather from OpenWeatherMap API
-def get_weather_by_coords(lat, lon, api_key):
-    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        temp = data["main"]["temp"]
-        weather_desc = data["weather"][0]["description"]
-        wind_speed = data["wind"]["speed"]
-        return f"Current weather: {weather_desc.capitalize()}, Temperature: {temp}°C, Wind Speed: {wind_speed} m/s."
-    except Exception as e:
-        return "Sorry, I couldn't fetch weather data right now."
+# -------------------- Helper Functions --------------------
+def fetch_argo_data(float_ids=None, limit=1000):
+    sql_query = "SELECT float_id_text AS float_id, latitude, longitude, temperature, salinity, pressure, measurement_time FROM argo_data WHERE 1=1"
+    params = {}
+    
+    if float_ids:
+        placeholders = ",".join([f":fid{i}" for i in range(len(float_ids))])
+        sql_query += f" AND float_id_text IN ({placeholders})"
+        params = {f"fid{i}": fid for i, fid in enumerate(float_ids)}
+    
+    sql_query += f" ORDER BY measurement_time ASC LIMIT {limit}"
+    df = pd.read_sql(text(sql_query), con=engine, params=params)
+    return df
 
-# Function to fetch latest ocean-related news from NewsAPI
-def get_latest_news(api_key, query="ocean OR climate", page_size=3):
-    url = f"https://newsapi.org/v2/everything?q={query}&sortBy=publishedAt&pageSize={page_size}&apiKey={api_key}"
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        articles = response.json().get("articles", [])
-        if not articles:
-            return "No recent news found."
-        news_list = "\n".join([f"- {a['title']} ({a['source']['name']})" for a in articles])
-        return f"Here are some recent news headlines:\n{news_list}"
-    except Exception as e:
-        return "Sorry, I couldn't fetch news right now."
+def extract_float_ids(user_query):
+    return re.findall(r"[0-9_]+", user_query)
 
-# Function to generate AI-like responses based on user query
-def get_ai_response(user_query):
-    time.sleep(1)  # simulate thinking delay
-
-    intro_phrases = [
-        "Sure thing! 🌊",
-        "You've got it! Here's what I found 👇",
-        "Ahoy! Here's the info you asked for:",
-        "Diving into the data... 🐠",
-        "Let's explore together 🌐"
-    ]
-    outro_phrases = [
-        "Let me know if you’d like to dive deeper! 🐬",
-        "Need more ocean insights? Just ask! 🌊",
-        "Wave if you want to keep exploring! 👋",
-        "Always happy to chart the waters with you! ⚓"
-    ]
-    intro = random.choice(intro_phrases)
-    outro = random.choice(outro_phrases)
-
-    query = user_query.lower()
-
-    # Handle weather queries
-    if "weather" in query or "storm" in query or "rain" in query:
-        # Example coords roughly center Indian Ocean (can be customized or enhanced later)
-        lat, lon = -10.0, 80.0
-        weather_info = get_weather_by_coords(lat, lon, OPENWEATHER_API_KEY)
-        return f"{intro} {weather_info} {outro}"
-
-    # Handle news queries
-    elif "news" in query or "update" in query or "latest" in query:
-        news_info = get_latest_news(NEWSAPI_API_KEY)
-        return f"{intro} {news_info} {outro}"
-
-    # Existing responses
-    elif "temperature" in query or "temp" in query:
-        return f"{intro} The average temperature in the Indian Ocean is around 28.5°C 📈. {outro}"
-    elif "salinity" in query or "salt" in query:
-        return f"{intro} Salinity levels are averaging around 34.8 PSU 🧂. {outro}"
-    elif "map" in query or "location" in query or "where" in query:
-        return f"{intro} Currently tracking 3 active floats in the Indian Ocean 🛰️. {outro}"
-    elif "compare" in query or "difference" in query:
-        return f"{intro} Here's a comparison of temperature and salinity across floats 📊. {outro}"
-    elif "current" in query or "currents" in query:
-        return f"{intro} Major currents include the Agulhas Current and the Somali Current 🌊, influencing marine life and climate. {outro}"
-    elif "depth" in query or "deep" in query:
-        return f"{intro} The Indian Ocean reaches depths over 7,000 meters in the Java Trench 🌐. {outro}"
-    elif "marine life" in query or "animals" in query or "species" in query:
-        return f"{intro} It hosts whales, dolphins, sea turtles, coral reefs, and many other species 🐋🐢🐠. {outro}"
-    elif "climate change" in query or "warming" in query or "impact" in query:
-        return f"{intro} Climate change affects ocean temperatures, sea level rise, and acidification, threatening marine ecosystems 🌍. {outro}"
+def get_ai_response(user_query, ocean_basin="Indian Ocean"):
+    float_ids = extract_float_ids(user_query)
+    df = fetch_argo_data(float_ids=float_ids)
+    
+    response_text = ""
+    plot = None
+    
+    if df.empty:
+        response_text = "No data found for the given float ID(s)."
     else:
-        return f"{intro} I can help with temperature, salinity, ocean currents, marine life, weather, news, float maps, and more. What would you like to explore today? 🤿"
+        # Determine which parameters to plot
+        params = []
+        user_lower = user_query.lower()
+        if any(word in user_lower for word in ["temperature", "temp"]):
+            params.append("temperature")
+        if any(word in user_lower for word in ["salinity", "salt"]):
+            params.append("salinity")
+        if any(word in user_lower for word in ["pressure", "press"]):
+            params.append("pressure")
+        if not params:
+            params = ["temperature", "salinity", "pressure"]  # default all
 
-# Voice speaking function using browser's SpeechSynthesis API
-def speak_text(text, voice_name, pitch, rate):
-    safe_text = text.replace('"', '\\"').replace('\n', ' ')
-    js_code = f"""
-    <script>
-    var voices = window.speechSynthesis.getVoices();
-    var msg = new SpeechSynthesisUtterance("{safe_text}");
-    msg.voice = voices.find(v => v.name === "{voice_name}") || null;
-    msg.pitch = {pitch};
-    msg.rate = {rate};
-    window.speechSynthesis.speak(msg);
-    </script>
-    """
-    st.components.v1.html(js_code, height=0, width=0)
+        # Create multi-line plot
+        fig = go.Figure()
+        for param in params:
+            for fid in df['float_id'].unique():
+                float_data = df[df['float_id'] == fid]
+                fig.add_trace(go.Scatter(
+                    x=float_data['measurement_time'],
+                    y=float_data[param],
+                    mode='lines+markers',
+                    name=f"{fid} - {param}"
+                ))
+        fig.update_layout(title=f"ARGO Data Trends ({', '.join(params)})",
+                          xaxis_title="Time", yaxis_title="Value",
+                          height=500)
+        plot = fig
+        response_text = f"Showing {', '.join(params)} trends for float(s): {', '.join(float_ids)}."
 
+    return {"text": response_text, "plot": plot, "data": df}
+
+# -------------------- Main App --------------------
 def main():
+    # Header
     st.markdown('<h1 class="main-header">🌊 FloatChat</h1>', unsafe_allow_html=True)
     st.markdown('### AI-Powered Conversational Interface for ARGO Ocean Data Discovery')
-
-    # Sidebar with example queries and voice controls
+    
+    # Sidebar
     with st.sidebar:
+        st.image("https://img.icons8.com/color/96/000000/ocean.png", width=80)
+        st.markdown("---")
+        st.header("🌐 Data Controls")
+        ocean_basin = st.selectbox(
+            "Select Ocean Basin",
+            ("Indian Ocean", "Global", "Pacific Ocean", "Atlantic Ocean", "Southern Ocean"),
+            index=0
+        )
+        st.markdown("---")
         st.header("💡 Example Queries")
         examples = [
-            "Show me temperature profiles near India",
-            "Compare salinity at 100m depth in 2023",
-            "Plot the trajectory of float 2902754",
-            "Show me ARGO float locations in Arabian Sea",
-            "Compare temperature between different floats",
-            "What's the current weather in the Indian Ocean?",
-            "Give me the latest news about the ocean"
+            "Show me temperature for float 1_339",
+            "Compare salinity at 100m depth",
+            "Plot trajectory of float 1_340"
         ]
         for example in examples:
-            if st.button(example):
-                st.session_state.messages.append({"role": "user", "content": example})
-                response = get_ai_response(example)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                speak_text(response, st.session_state.voice, st.session_state.pitch, st.session_state.rate)
+            if st.button(example, key=example):
+                st.session_state.user_input = example
+                st.rerun()
+    
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["💬 Chat Interface", "📊 Data Explorer", "🗺️ Float Map"])
+    
+    # --- Chat Interface ---
+    with tab1:
+        st.markdown('<h3 class="sub-header">Chat with ARGO Data</h3>', unsafe_allow_html=True)
+        for message in st.session_state.messages:
+            if message["role"] == "user":
+                st.markdown(f'<div class="chat-message user-message"><b>You:</b> {message["content"]}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="chat-message assistant-message"><b>FloatChat:</b> {message["content"]}</div>', unsafe_allow_html=True)
+                if "plot" in message and message["plot"] is not None:
+                    st.plotly_chart(message["plot"], use_container_width=True)
+                if "data" in message and message["data"] is not None:
+                    with st.expander("View Data Table"):
+                        st.dataframe(message["data"].head(10))
+        
+        user_input = st.chat_input("Ask about ocean data...")
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            with st.spinner("Analyzing ocean data..."):
+                response = get_ai_response(user_input, ocean_basin)
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response["text"],
+                "plot": response["plot"],
+                "data": response["data"]
+            })
+            st.rerun()
+    
+    # --- Data Explorer ---
+    with tab2:
+        st.markdown('<h3 class="sub-header">Direct Data Exploration</h3>', unsafe_allow_html=True)
+        float_ids_input = st.text_input("Enter float IDs (comma-separated)", value="1_339,1_340")
+        if st.button("Load Data"):
+            float_ids = [fid.strip() for fid in float_ids_input.split(",")]
+            df = fetch_argo_data(float_ids=float_ids, limit=1000)
+            if not df.empty:
+                st.dataframe(df)
+                fig = px.line(df, x='measurement_time', y=['temperature','salinity','pressure'], color='float_id')
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data found for these float IDs.")
+    
+    # --- Float Map ---
+    with tab3:
+        st.markdown('<h3 class="sub-header">ARGO Float Locations</h3>', unsafe_allow_html=True)
+        df_map = fetch_argo_data(limit=500).drop_duplicates('float_id')
+        if not df_map.empty:
+            fig_map = px.scatter_map(
+                df_map,
+                lat="latitude",
+                lon="longitude",
+                hover_name="float_id",
+                hover_data=["temperature","salinity","pressure"],
+                color="float_id",
+                zoom=3,
+                height=600
+            )
+            fig_map.update_layout(map_style="open-street-map")
+            fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+            st.plotly_chart(fig_map, use_container_width=True)
+            st.info(f"Showing {len(df_map)} active ARGO floats in the {ocean_basin} region.")
 
-        st.markdown("---")
-        st.header("🎤 Voice Personality Settings")
-
-        voices_list = [
-            "Google US English",
-            "Google UK English Male",
-            "Google UK English Female",
-            "Microsoft Zira Desktop - English (United States)",
-            "Microsoft David Desktop - English (United States)"
-        ]
-        voice = st.selectbox(
-            "Select voice",
-            voices_list,
-            index=voices_list.index(st.session_state.voice) if st.session_state.voice in voices_list else 0
-        )
-        st.session_state.voice = voice
-
-        pitch = st.slider("Pitch", 0.5, 2.0, st.session_state.pitch, 0.1)
-        st.session_state.pitch = pitch
-
-        rate = st.slider("Rate (speed)", 0.5, 2.0, st.session_state.rate, 0.1)
-        st.session_state.rate = rate
-
-    # Display chat messages
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            st.markdown(f'<div class="chat-message user-message">{msg["content"]}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="chat-message assistant-message">{msg["content"]}</div>', unsafe_allow_html=True)
-
-    # User input box and send button
-    user_input = st.text_input("Ask me about ocean data...", value=st.session_state.user_input, key="input")
-    submit = st.button("Send")
-
-    if submit and user_input.strip():
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.spinner("Thinking..."):
-            response = get_ai_response(user_input)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-
-        speak_text(response, st.session_state.voice, st.session_state.pitch, st.session_state.rate)
-        st.session_state.user_input = ""
-
+# Run the app
 if __name__ == "__main__":
     main()
